@@ -1,57 +1,98 @@
-import { Stmt, Expr } from "./ast";
+import { stringInput } from "lezer-tree";
+import { Stmt, Expr, Op } from "./ast";
 import { parse } from "./parser";
 
 // https://learnxinyminutes.com/docs/wasm/
 
-type LocalEnv = Map<string, boolean>;
+// Numbers are offsets into global memory
+export type GlobalEnv = {
+  globals: Map<string, number>;
+  offset: number;
+}
+
+export const emptyEnv = { globals: new Map(), offset: 0 };
+
+export function augmentEnv(env: GlobalEnv, stmts: Array<Stmt>) : GlobalEnv {
+  const newEnv = new Map(env.globals);
+  var newOffset = env.offset;
+  stmts.forEach((s) => {
+    switch(s.tag) {
+      case "define":
+        newEnv.set(s.name, newOffset);
+        newOffset += 1;
+        break;
+    }
+  })
+  return {
+    globals: newEnv,
+    offset: newOffset
+  }
+}
 
 type CompileResult = {
   wasmSource: string,
+  newEnv: GlobalEnv
 };
 
-export function compile(source: string) : CompileResult {
+export function compile(source: string, env: GlobalEnv) : CompileResult {
   const ast = parse(source);
-  const definedVars = new Set();
-  ast.forEach(s => {
-    switch(s.tag) {
-      case "define":
-        definedVars.add(s.name);
-        break;
-    }
-  }); 
-  const scratchVar : string = `(local $$last i32)`;
-  const localDefines = [scratchVar];
-  definedVars.forEach(v => {
-    localDefines.push(`(local $${v} i32)`);
-  })
-  
-  const commandGroups = ast.map((stmt) => codeGen(stmt));
-  const commands = localDefines.concat([].concat.apply([], commandGroups));
-  console.log("Generated: ", commands.join("\n"));
+  const withDefines = augmentEnv(env, ast);
+  const commandGroups = ast.map((stmt) => codeGen(stmt, withDefines));
+  const commands = [].concat.apply([], commandGroups);
   return {
     wasmSource: commands.join("\n"),
+    newEnv: withDefines
   };
 }
 
-function codeGen(stmt: Stmt) : Array<string> {
+function envLookup(env : GlobalEnv, name : string) : number {
+  if(!env.globals.has(name)) { console.log("Could not find " + name + " in ", env); throw new Error("Could not find name " + name); }
+  return (env.globals.get(name) * 4); // 4-byte values
+}
+
+function codeGen(stmt: Stmt, env: GlobalEnv) : Array<string> {
   switch(stmt.tag) {
     case "define":
-      var valStmts = codeGenExpr(stmt.value);
-      return valStmts.concat([`(local.set $${stmt.name})`]);
+      const locationToStore = [`(i32.const ${envLookup(env, stmt.name)}) ;; ${stmt.name}`];
+      var valStmts = codeGenExpr(stmt.value, env);
+      return locationToStore.concat(valStmts).concat([`(i32.store)`]);
+    case "print":
+      var valStmts = codeGenExpr(stmt.value, env);
+      return valStmts.concat([
+        "(call $print)"
+      ]);      
     case "expr":
-      var exprStmts = codeGenExpr(stmt.expr);
-      return exprStmts.concat([`(local.set $$last)`]);
+      return codeGenExpr(stmt.expr, env);
+    case "globals":
+      var globalStmts : Array<string> = [];
+      env.globals.forEach((pos, name) => {
+        globalStmts.push(
+          `(i32.const ${pos})`,
+          `(i32.const ${envLookup(env, name)})`,
+          `(i32.load)`,
+          `(call $printglobal)`
+        );
+      });
+      return globalStmts;  
   }
 }
 
-function codeGenExpr(expr : Expr) : Array<string> {
+function codeGenExpr(expr : Expr, env: GlobalEnv) : Array<string> {
   switch(expr.tag) {
-    case "builtin1":
-      const argStmts = codeGenExpr(expr.arg);
-      return argStmts.concat([`(call $${expr.name})`]);
     case "num":
       return ["(i32.const " + expr.value + ")"];
     case "id":
-      return [`(local.get $${expr.name})`];
+      return [`(i32.const ${envLookup(env, expr.name)})`, `i32.load `]
+    case "op":
+      return codeGenOp(expr.op, expr.left, expr.right, env);
   }
+}
+
+function codeGenOp(op: Op, left: Expr, right: Expr, env: GlobalEnv): Array<string> {
+  var leftStmts = codeGenExpr(left, env);
+  var rightStmts = codeGenExpr(right, env);
+
+  return leftStmts.concat(rightStmts.concat([
+    `(i32.add )`
+  ]));
 }
