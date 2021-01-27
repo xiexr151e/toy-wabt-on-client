@@ -19,7 +19,17 @@ function webStart() {
           var name = importObject.nameMap[pos];
           var msg = name + " = " + value;
           renderResult(msg);
-        }
+        },
+
+        print_int: (value: number) => {
+          var msg = value;
+          renderResult(msg);
+        },
+
+        print_bool: (value: number) => {
+          var msg = value === 1 ? "True": "False";
+          renderResult(msg);
+        },
       },
     
       nameMap: new Array<string>(),
